@@ -1,0 +1,257 @@
+from pathlib import Path
+
+import pandas as pd
+from xgboost import XGBClassifier
+
+from risk_engine import calculate_risk_score
+
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+DATA_FILE = (
+    BASE_DIR
+    / "data"
+    / "processed"
+    / "argus_features.csv"
+)
+
+MODEL_FILE = (
+    BASE_DIR
+    / "models"
+    / "argus_xgboost.json"
+)
+
+
+def print_alert(row, probability, risk_score, severity):
+
+    print()
+    print("╔" + "═" * 68 + "╗")
+    print("║" + "ARGUS SECURITY ALERT".center(68) + "║")
+    print("╠" + "═" * 68 + "╣")
+
+    print(
+        f"║ Host             : "
+        f"{str(row['host_id']):<46}║"
+    )
+
+    print(
+        f"║ Run              : "
+        f"{str(row['run_id']):<46}║"
+    )
+
+    print(
+        f"║ Window           : "
+        f"{str(row['window_id']):<46}║"
+    )
+
+    print(
+        f"║ Scenario         : "
+        f"{str(row['scenario']):<46}║"
+    )
+
+    print("║" + " " * 68 + "║")
+
+    print(
+        f"║ Threat Probability : "
+        f"{probability * 100:>7.2f}%"
+        + " " * 43
+        + "║"
+    )
+
+    print(
+        f"║ Risk Score         : "
+        f"{risk_score:>7.2f}/100"
+        + " " * 45
+        + "║"
+    )
+
+    print(
+        f"║ Severity           : "
+        f"{severity:<46}║"
+    )
+
+    print("║" + " " * 68 + "║")
+
+    print("║ Evidence:".ljust(69) + "║")
+
+    evidence = []
+
+    if row.get("powershell_count", 0) > 0:
+        evidence.append("PowerShell execution")
+
+    if row.get("cmd_count", 0) > 0:
+        evidence.append("Command shell execution")
+
+    if row.get("suspicious_parent_child_count", 0) > 0:
+        evidence.append("Suspicious process relationship")
+
+    if row.get("file_write_velocity", 0) > 1:
+        evidence.append(
+            f"High file-write velocity "
+            f"({row['file_write_velocity']:.2f}/sec)"
+        )
+
+    if row.get("entropy_delta_mean", 0) > 1:
+        evidence.append(
+            f"Significant entropy increase "
+            f"({row['entropy_delta_mean']:.2f})"
+        )
+
+    if row.get("persistence_key_count", 0) > 0:
+        evidence.append("Registry persistence activity")
+
+    if row.get("network_connection_count", 0) > 5:
+        evidence.append("Elevated network activity")
+
+    if row.get("failed_login_count", 0) > 3:
+        evidence.append(
+            "Multiple failed authentication attempts"
+        )
+
+    if not evidence:
+        evidence.append(
+            "No strong behavioral indicators"
+        )
+
+    for item in evidence:
+        print(
+            f"║  • {item:<64}║"
+        )
+
+    print("║" + " " * 68 + "║")
+
+    print(
+        f"║ Attack Phase      : "
+        f"{str(row['dominant_phase']):<46}║"
+    )
+
+    print("╚" + "═" * 68 + "╝")
+
+
+def main():
+
+    if not DATA_FILE.exists():
+        raise FileNotFoundError(
+            "Feature dataset not found."
+        )
+
+    if not MODEL_FILE.exists():
+        raise FileNotFoundError(
+            "Trained ARGUS model not found."
+        )
+
+    print()
+    print("Loading ARGUS model...")
+
+    model = XGBClassifier()
+
+    model.load_model(
+        MODEL_FILE
+    )
+
+    print("Loading telemetry features...")
+
+    df = pd.read_csv(
+        DATA_FILE
+    )
+
+    # -----------------------------------------------------
+    # Select suspicious example
+    # -----------------------------------------------------
+
+    suspicious = df[
+        df["scenario"] == "ransomware_like"
+    ]
+
+    if suspicious.empty:
+        suspicious = df[
+            df["label"] == 1
+        ]
+
+    if suspicious.empty:
+        raise RuntimeError(
+            "No suspicious examples found."
+        )
+
+    # Keep the original dataframe index.
+    # This is important when selecting the prediction row.
+    selected_index = suspicious.sort_values(
+        "file_write_velocity",
+        ascending=False
+    ).index[0]
+
+    row = df.loc[selected_index]
+
+    # -----------------------------------------------------
+    # Prepare model features
+    # -----------------------------------------------------
+
+    metadata_columns = [
+        "label",
+        "scenario",
+        "dominant_phase",
+        "run_id",
+        "host_id",
+        "window_id",
+    ]
+
+    X = df.drop(
+        columns=metadata_columns,
+        errors="ignore"
+    )
+
+    # Only numeric columns
+    X = X.select_dtypes(
+        include=["number"]
+    )
+
+    X = X.apply(
+        pd.to_numeric,
+        errors="coerce"
+    )
+
+    X = X.fillna(0)
+
+    # -----------------------------------------------------
+    # IMPORTANT FIX
+    # -----------------------------------------------------
+    # Select the row directly from the numeric dataframe.
+    # This preserves numeric dtypes and prevents XGBoost's
+    # "DataFrame.dtypes must be int, float, bool or category"
+    # error.
+
+    X_row = X.loc[
+        [selected_index]
+    ].astype(float)
+
+    # -----------------------------------------------------
+    # Prediction
+    # -----------------------------------------------------
+
+    probability = model.predict_proba(
+        X_row
+    )[0][1]
+
+    # -----------------------------------------------------
+    # Risk score
+    # -----------------------------------------------------
+
+    risk_score, severity = calculate_risk_score(
+        row,
+        probability
+    )
+
+    # -----------------------------------------------------
+    # Display alert
+    # -----------------------------------------------------
+
+    print_alert(
+        row,
+        probability,
+        risk_score,
+        severity
+    )
+
+
+if __name__ == "__main__":
+    main()
