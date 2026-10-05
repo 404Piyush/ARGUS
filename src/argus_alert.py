@@ -1,9 +1,20 @@
 from pathlib import Path
+import argparse
+import sys
 
 import pandas as pd
 from xgboost import XGBClassifier
 
-from risk_engine import calculate_risk_score
+# Robust import: works as `python -m src.argus_alert` (root) and
+# `python src/argus_alert.py` (src cwd) and `pytest` (rootdir).
+try:
+    from src.risk_engine import calculate_risk_score
+except ImportError:  # fallback when cwd == src/
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    try:
+        from src.risk_engine import calculate_risk_score
+    except ImportError:
+        from risk_engine import calculate_risk_score
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -20,6 +31,55 @@ MODEL_FILE = (
     / "models"
     / "argus_xgboost.json"
 )
+
+
+def collect_evidence(row):
+    """Return evidence strings — kept in parity with risk_engine WEIGHTS."""
+    evidence = []
+
+    if row.get("powershell_count", 0) > 0:
+        evidence.append("PowerShell execution")
+
+    if row.get("cmd_count", 0) > 0:
+        evidence.append("Command shell execution")
+
+    if row.get("suspicious_parent_child_count", 0) > 0:
+        evidence.append("Suspicious process relationship")
+
+    if row.get("file_write_velocity", 0) > 1:
+        evidence.append(
+            f"High file-write velocity "
+            f"({row['file_write_velocity']:.2f}/sec)"
+        )
+
+    if row.get("high_entropy_write_count", 0) > 5:
+        evidence.append(
+            f"High-entropy writes "
+            f"({int(row['high_entropy_write_count'])})"
+        )
+
+    if row.get("entropy_delta_mean", 0) > 1:
+        evidence.append(
+            f"Significant entropy increase "
+            f"({row['entropy_delta_mean']:.2f})"
+        )
+
+    if row.get("persistence_key_count", 0) > 0:
+        evidence.append("Registry persistence activity")
+
+    if row.get("network_connection_count", 0) > 5:
+        evidence.append("Elevated network activity")
+
+    if row.get("failed_login_count", 0) > 3:
+        evidence.append(
+            "Multiple failed authentication attempts"
+        )
+
+    if not evidence:
+        evidence.append(
+            "No strong behavioral indicators"
+        )
+    return evidence
 
 
 def print_alert(row, probability, risk_score, severity):
@@ -74,44 +134,7 @@ def print_alert(row, probability, risk_score, severity):
 
     print("║ Evidence:".ljust(69) + "║")
 
-    evidence = []
-
-    if row.get("powershell_count", 0) > 0:
-        evidence.append("PowerShell execution")
-
-    if row.get("cmd_count", 0) > 0:
-        evidence.append("Command shell execution")
-
-    if row.get("suspicious_parent_child_count", 0) > 0:
-        evidence.append("Suspicious process relationship")
-
-    if row.get("file_write_velocity", 0) > 1:
-        evidence.append(
-            f"High file-write velocity "
-            f"({row['file_write_velocity']:.2f}/sec)"
-        )
-
-    if row.get("entropy_delta_mean", 0) > 1:
-        evidence.append(
-            f"Significant entropy increase "
-            f"({row['entropy_delta_mean']:.2f})"
-        )
-
-    if row.get("persistence_key_count", 0) > 0:
-        evidence.append("Registry persistence activity")
-
-    if row.get("network_connection_count", 0) > 5:
-        evidence.append("Elevated network activity")
-
-    if row.get("failed_login_count", 0) > 3:
-        evidence.append(
-            "Multiple failed authentication attempts"
-        )
-
-    if not evidence:
-        evidence.append(
-            "No strong behavioral indicators"
-        )
+    evidence = collect_evidence(row)
 
     for item in evidence:
         print(
@@ -128,7 +151,33 @@ def print_alert(row, probability, risk_score, severity):
     print("╚" + "═" * 68 + "╝")
 
 
-def main():
+def select_suspicious(df, scenario="ransomware_like", top_n=1):
+    """Select top-N suspicious windows by file_write_velocity."""
+    suspicious = df[
+        df["scenario"] == scenario
+    ]
+
+    if suspicious.empty:
+        suspicious = df[
+            df["label"] == 1
+        ]
+
+    if suspicious.empty:
+        raise RuntimeError(
+            "No suspicious examples found."
+        )
+
+    # Keep the original dataframe index.
+    # This is important when selecting the prediction row.
+    ranked = suspicious.sort_values(
+        "file_write_velocity",
+        ascending=False
+    )
+    indices = list(ranked.index[:max(1, top_n)])
+    return indices
+
+
+def main(scenario="ransomware_like", top_n=1):
 
     if not DATA_FILE.exists():
         raise FileNotFoundError(
@@ -156,29 +205,11 @@ def main():
     )
 
     # -----------------------------------------------------
-    # Select suspicious example
+    # Select suspicious examples
     # -----------------------------------------------------
 
-    suspicious = df[
-        df["scenario"] == "ransomware_like"
-    ]
-
-    if suspicious.empty:
-        suspicious = df[
-            df["label"] == 1
-        ]
-
-    if suspicious.empty:
-        raise RuntimeError(
-            "No suspicious examples found."
-        )
-
-    # Keep the original dataframe index.
-    # This is important when selecting the prediction row.
-    selected_index = suspicious.sort_values(
-        "file_write_velocity",
-        ascending=False
-    ).index[0]
+    indices = select_suspicious(df, scenario=scenario, top_n=top_n)
+    selected_index = indices[0]
 
     row = df.loc[selected_index]
 
@@ -251,7 +282,17 @@ def main():
         risk_score,
         severity
     )
+    return {
+        "probability": float(probability),
+        "risk_score": risk_score,
+        "severity": severity,
+        "index": int(selected_index),
+    }
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="ARGUS demo alert")
+    parser.add_argument("--scenario", default="ransomware_like")
+    parser.add_argument("--top-n", type=int, default=1)
+    args = parser.parse_args()
+    main(scenario=args.scenario, top_n=args.top_n)
