@@ -39,6 +39,31 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 MODEL_FILE = BASE_DIR / "models" / "argus_xgboost.json"
 QUARANTINE_DIR = BASE_DIR / "quarantine"
 FEEDBACK_DB = BASE_DIR / "feedback.db"
+LIVE_FEATURES = BASE_DIR / "data" / "live" / "live_features.csv"
+
+
+def persist_live_windows(feats, live_path=LIVE_FEATURES):
+    """Append scored live windows for nightly retrain. Dedups on run_id+window_id."""
+    try:
+        import pandas as pd
+    except ImportError:
+        return 0
+    cols = [c for c in feats.columns if c != "threat_probability"]
+    snap = feats[cols].copy()
+    live_path.parent.mkdir(parents=True, exist_ok=True)
+    if live_path.exists():
+        try:
+            prev = pd.read_csv(live_path, usecols=["run_id", "window_id"])
+            keys = set(zip(prev["run_id"].astype(str), prev["window_id"].astype(int)))
+            snap = snap[~snap.apply(
+                lambda r: (str(r["run_id"]), int(r["window_id"])) in keys, axis=1)]
+        except Exception:
+            pass
+    if snap.empty:
+        return 0
+    header = not live_path.exists()
+    snap.to_csv(live_path, mode="a", index=False, header=header)
+    return len(snap)
 
 
 def model_hash():
@@ -285,6 +310,12 @@ def guard_once(enforce=False, top_n=3):
     if feats is None:
         return {"events": 0}
     ensure_feedback_db()
+    try:
+        n = persist_live_windows(feats)
+        if n:
+            print(f"[ARGUS] Persisted {n} live windows -> {LIVE_FEATURES}")
+    except Exception as e:
+        print(f"[ARGUS] Live persist skipped: {e}")
     mh = model_hash() if MODEL_FILE.exists() else "none"
     con = sqlite3.connect(FEEDBACK_DB)
     shown = 0

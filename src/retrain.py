@@ -28,6 +28,7 @@ except ImportError:
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FEATURES_CSV = BASE_DIR / "data" / "processed" / "argus_features.csv"
+LIVE_FEATURES = BASE_DIR / "data" / "live" / "live_features.csv"
 MODEL_FILE = BASE_DIR / "models" / "argus_xgboost.json"
 GOLDEN = BASE_DIR / "tests" / "golden" / "baseline_metrics.json"
 FEEDBACK_DB = BASE_DIR / "feedback.db"
@@ -56,6 +57,34 @@ def apply_feedback(base: pd.DataFrame, fb: pd.DataFrame) -> pd.DataFrame:
     base = base.drop(columns=["fb_label"])
     print(f"Applied {int(mask.sum())} feedback labels")
     return base
+
+
+def load_labeled_live(live_path=LIVE_FEATURES, db=FEEDBACK_DB):
+    """Labeled live windows: live_features.csv joined to feedback.db labels."""
+    if not live_path.exists() or not db.exists():
+        return None
+    live = pd.read_csv(live_path)
+    if live.empty:
+        return None
+    con = sqlite3.connect(db)
+    try:
+        labels = pd.read_sql_query(
+            "SELECT run_id, window_id, label FROM feedback WHERE label IS NOT NULL",
+            con)
+    finally:
+        con.close()
+    if labels.empty:
+        return None
+    labels["window_id"] = labels["window_id"].astype(int)
+    live["window_id"] = live["window_id"].astype(int)
+    m = live.merge(labels, on=["run_id", "window_id"], how="inner",
+                   suffixes=("", "_fb"))
+    if m.empty:
+        return None
+    m["label"] = m["label_fb"].astype(int)
+    m = m.drop(columns=["label_fb"])
+    # Align to base columns, live-only extras dropped
+    return m
 
 
 def load_db_feedback() -> pd.DataFrame | None:
@@ -94,6 +123,12 @@ def main():
     db_fb = load_db_feedback()
     if db_fb is not None:
         df = apply_feedback(df, db_fb)
+    live = load_labeled_live()
+    if live is not None:
+        keep = [c for c in df.columns if c in live.columns]
+        live = live[keep]
+        df = pd.concat([df, live], ignore_index=True)
+        print(f"Merged {len(live)} labeled live windows (total {len(df)})")
 
     model, metrics, _ = train_and_evaluate(df)
     print(f"P={metrics['precision']:.4f} R={metrics['recall']:.4f} "

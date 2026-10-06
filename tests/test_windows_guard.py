@@ -113,3 +113,42 @@ def test_collector_snapshot_schema():
         for k in ["event_id", "timestamp", "host_id", "run_id",
                   "window_id", "event_type", "label", "scenario"]:
             assert k in e
+
+
+def test_etw_sources_graceful():
+    # No Sysmon/audit on CI or this box -> must return list, never raise
+    from src.collector_windows import collect_sysmon_events, collect_4688_events
+    assert isinstance(collect_sysmon_events(), list)
+    assert isinstance(collect_4688_events(), list)
+
+
+def test_live_persist_dedups(tmp_path):
+    import pandas as pd
+    from src.guard import persist_live_windows
+    lp = tmp_path / "live.csv"
+    df = pd.DataFrame([
+        {"run_id": "R1", "window_id": 0, "label": 0, "scenario": "live_host"},
+        {"run_id": "R1", "window_id": 1, "label": 0, "scenario": "live_host"},
+    ])
+    assert persist_live_windows(df, lp) == 2
+    assert persist_live_windows(df, lp) == 0  # dup run+window skipped
+
+
+def test_labeled_live_merge(tmp_path):
+    import sqlite3
+    import pandas as pd
+    from src.retrain import load_labeled_live
+    lp = tmp_path / "live.csv"
+    db = tmp_path / "fb.db"
+    pd.DataFrame([
+        {"run_id": "L1", "window_id": 0, "label": 0, "scenario": "live_host"},
+        {"run_id": "L2", "window_id": 0, "label": 0, "scenario": "live_host"},
+    ]).to_csv(lp, index=False)
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE feedback(run_id TEXT, window_id INTEGER, label INTEGER)")
+    con.execute("INSERT INTO feedback VALUES(?, ?, ?)", ("L1", 0, 1))
+    con.commit()
+    con.close()
+    m = load_labeled_live(lp, db)
+    assert m is not None and len(m) == 1
+    assert int(m.iloc[0]["label"]) == 1

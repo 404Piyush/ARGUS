@@ -222,6 +222,92 @@ def collect_auth_failures(host_id=None, run_id=None, window_id=0, limit=20):
     return events
 
 
+def collect_sysmon_events(host_id=None, run_id=None, window_id=0, limit=50):
+    """Sysmon Operational log: 1 process create, 3 network, 13 registry (best-effort)."""
+    events = []
+    try:
+        import win32evtlog
+    except ImportError:
+        return events
+    try:
+        h = win32evtlog.OpenEventLog(None, "Microsoft-Windows-Sysmon/Operational")
+        flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
+        for e in (win32evtlog.ReadEventLog(h, flags, 0) or [])[:200]:
+            try:
+                eid = e.EventID & 0xFFFF
+                ins = e.StringInserts or []
+                blob = " | ".join(str(s) for s in ins[:20])
+                bl = blob.lower()
+                if eid == 1 and len(events) < limit:  # process create
+                    img = str(ins[5]) if len(ins) > 5 else ""
+                    parent = str(ins[13]) if len(ins) > 13 else ""
+                    events.append(make_live_event(
+                        "process_create", host_id=host_id, run_id=run_id,
+                        window_id=window_id, process_name=img or None,
+                        parent_process=parent or None, tree_depth=3,
+                        source="sysmon:1"))
+                elif eid == 3 and len(events) < limit:  # network
+                    ip = str(ins[9]) if len(ins) > 9 else ""
+                    port = None
+                    try:
+                        port = int(str(ins[10])) if len(ins) > 10 else None
+                    except Exception:
+                        port = None
+                    events.append(make_live_event(
+                        "network_connection", host_id=host_id, run_id=run_id,
+                        window_id=window_id, destination_ip=ip or None,
+                        destination_port=port, protocol="TCP",
+                        source="sysmon:3"))
+                elif eid == 13 and len(events) < limit:  # registry
+                    target = str(ins[4]) if len(ins) > 4 else ""
+                    if "currentversion\\run" in target.lower():
+                        events.append(make_live_event(
+                            "registry_modify", label=1, attack_phase="PERSISTENCE",
+                            host_id=host_id, run_id=run_id, window_id=window_id,
+                            registry_key=target, registry_action="MODIFY",
+                            source="sysmon:13"))
+                if len(events) >= limit:
+                    break
+            except Exception:
+                continue
+        win32evtlog.CloseEventLog(h)
+    except Exception:
+        return events
+    return events
+
+
+def collect_4688_events(host_id=None, run_id=None, window_id=0, limit=30):
+    """Security log 4688 process creations (needs auditing enabled, best-effort)."""
+    events = []
+    try:
+        import win32evtlog
+    except ImportError:
+        return events
+    try:
+        h = win32evtlog.OpenEventLog(None, "Security")
+        flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
+        for e in (win32evtlog.ReadEventLog(h, flags, 0) or [])[:300]:
+            try:
+                if (e.EventID & 0xFFFF) != 4688:
+                    continue
+                ins = e.StringInserts or []
+                img = str(ins[5]) if len(ins) > 5 else ""
+                parent = str(ins[13]) if len(ins) > 13 else ""
+                events.append(make_live_event(
+                    "process_create", host_id=host_id, run_id=run_id,
+                    window_id=window_id, process_name=img or None,
+                    parent_process=parent or None, tree_depth=2,
+                    source="security:4688"))
+                if len(events) >= limit:
+                    break
+            except Exception:
+                continue
+        win32evtlog.CloseEventLog(h)
+    except Exception:
+        return events
+    return events
+
+
 def collect_snapshot(host_id=None, run_id=None, window_id=0):
     """One-shot snapshot combining all sources."""
     host_id = host_id or socket.gethostname().upper()
@@ -231,6 +317,8 @@ def collect_snapshot(host_id=None, run_id=None, window_id=0):
     events += collect_network(host_id, run_id, window_id)
     events += collect_persistence(host_id, run_id, window_id)
     events += collect_auth_failures(host_id, run_id, window_id)
+    events += collect_sysmon_events(host_id, run_id, window_id)
+    events += collect_4688_events(host_id, run_id, window_id)
     return events
 
 
