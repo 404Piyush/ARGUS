@@ -9,7 +9,7 @@ random.seed(SEED)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / "data" / "raw" / "synthetic"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+ # mkdir moved to main() for import safety
 
 SCENARIOS = [
     "benign_normal",
@@ -890,6 +890,7 @@ def generate_run(scenario, run_number):
 
 
 def main():
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     combined_file = OUTPUT_DIR / "all_synthetic_telemetry.jsonl"
 
     total_events = 0

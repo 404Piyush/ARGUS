@@ -47,15 +47,7 @@ TEST_SIZE = 0.25
 RANDOM_STATE = 42
 THRESHOLD = 0.5
 
-RESULTS_DIR.mkdir(
-    parents=True,
-    exist_ok=True
-)
-
-MODEL_DIR.mkdir(
-    parents=True,
-    exist_ok=True
-)
+# NOTE: dirs created in main(), not at import.
 
 
 def train_and_evaluate(df, test_size=TEST_SIZE, seed=RANDOM_STATE,
@@ -113,6 +105,8 @@ def train_and_evaluate(df, test_size=TEST_SIZE, seed=RANDOM_STATE,
 
 
 def main(test_size=TEST_SIZE, seed=RANDOM_STATE, no_plots=False):
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     if not INPUT_FILE.exists():
         raise FileNotFoundError(
