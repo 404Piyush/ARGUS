@@ -1,6 +1,7 @@
 from pathlib import Path
 import argparse
 import json
+import os
 
 import matplotlib
 
@@ -84,7 +85,7 @@ def train_and_evaluate(df, test_size=TEST_SIZE, seed=RANDOM_STATE,
         objective="binary:logistic",
         eval_metric="logloss",
         random_state=seed,
-        n_jobs=4,
+        n_jobs=os.cpu_count() or 4,
     )
     model.fit(X_train, y_train)
 
